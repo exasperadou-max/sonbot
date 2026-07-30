@@ -1,4 +1,5 @@
 require("dotenv").config();
+const axios = require("axios");
 
 const { App } = require("@slack/bolt");
 
@@ -108,6 +109,257 @@ app.command("/sonbot-country", async ({ ack, respond }) => {
   } catch (error) {
     console.error(error);
     await respond({ text: "Couldn't fetch a country right now, try again later" });
+  }
+});
+
+app.command("/sonbot-help", async ({ ack, respond }) => {
+  await ack();
+  await respond({
+    text:
+`Available Commands:
+/sonbot-ping - Check bot latency
+/sonbot-catfact - Get a cat 
+/sonbot-bitcoin - Price of Bitcoin in real time
+/sonbot-frog - Random frog and a fact about it
+/sonbot-country - Random country/territory
+/sonbot-joke - Get a joke
+/sonbot-explain [topic] - Explain a topic briefly
+/sonbot-hi - Says hi!
+/sonbot-quake - Most recent earthquake
+/sonbot-word - Random word and its meaning
+/sonbot-iss - Current ISS position and who is aboard.`
+  });
+});
+
+app.command("/sonbot-iss", async ({ ack, respond}) => {
+  await ack();
+  try {
+    const [posRes, astroRes] = await Promise.all([
+      fetch("http://api.open-notify.org/iss-now.json"),
+      fetch("http://api.open-notify.org/astros.json")
+    ]);
+
+    if (!posRes.ok || !astroRes.ok) {
+      if (posRes.status === 429 || astroData.Res.status === 429) {
+        await respond({ text: `ISS API rate limit hit, try again later`});
+        return;
+      }
+      throw new Error(`ISS API returned non-ok status: pos=${posRes.status}, astro=${astroRes.status}`);
+    }
+
+    const posData = await posRes.json();
+    const astroData = await astroRes.json();
+
+    const lat = parseFloat(posData.iss_position.latitude).toFixed(2);
+    const lon = parseFloat(posData.iss_position.longitude).toFixed(2);
+    const issCrew = astroData.people.filter(p => p.craft === "ISS");
+    const crewNames = issCrew.map(p => p.name).join(", ");
+
+    await respond({
+      text: `*ISS Current Position*\nLat: ${lat}, Lon: ${lon}\n\n*${issCrew.length} astronauts aboard:*\n${crewNames}`
+    });
+  } catch (error) {
+    console.error("Error fetching ISS data:", error);
+    await respond({ text: "Couldn't fetch ISS data right now, try again later"});
+  }
+});
+
+app.command("/sonbot-quake", async ({ ack, respond }) => {
+  
+  const t0 = Date.now();
+  await ack();
+  console.log(`ack took ${Date.now() - t0}ms`);
+
+  try {
+    const t1 = Date.now();
+    const res = await fetch("https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/significant_week.geojson");
+    const data = await res.json();
+    console.log(`fetch+parse took ${Date.now() - t1}ms`);
+
+    if (!data.features || data.features.length === 0) {
+      await respond({ text: "No significant earthquakes recorded in the last 24 hours."})
+      return;
+    }
+    
+    const quake = data.features[0];
+    const mag = quake.properties.mag;
+    const place = quake.properties.place;
+    const time = new Date(quake.properties.time).toUTCString();
+    const url = quake.properties.url;
+
+    const t2 = Date.now();
+
+    await respond({
+      text: `*Latest Earthquake*\nMagnitude: ${mag}\nLocation: ${place}\nTime: ${time}\n<${url}|View on USGS>`
+    });
+    console.log(`respond took ${Date.now() - 2}ms`);
+    console.log(`TOTAL: ${Date.now() - t0}ms`);
+  } catch (error) {
+    console.error("Error fetching earthquake data:", error);
+    await respond({ text: "Couldn't fetch earthquake data right now, try again later"});
+  }
+});
+
+app.command("/sonbot-catfact", async ({ ack, respond }) => {
+  await ack();
+
+  try {
+    const response = await axios.get("https://catfact.ninja/fact");
+    await respond({ text: `Cat Fact:\n${response.data.fact}` });
+  } catch (err) {
+    await respond({ text: "Failed to fetch a cat fact." });
+  }
+});
+
+app.command("/sonbot-joke", async ({ ack, respond }) => {
+  await ack();
+
+  try {
+    const response = await axios.get("https://official-joke-api.appspot.com/random_joke");
+    await respond({
+      text:
+`${response.data.setup}
+
+${response.data.punchline}`
+    });
+  } catch (err) {
+    await respond({ text: "Failed to fetch a joke." });
+  }
+}); 
+
+app.command("/sonbot-explain", async ({ command, ack, respond}) => {
+  await ack();
+  const topic = command.text.trim();
+
+  if (!topic) {
+    await respond({
+     response_type: "ephemeral",
+     text: "Give me a topic to explain, e.g `/sonbot-explain photosynthesis`"
+    });
+    return;
+  }
+
+  try {
+    const url = `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(topic)}`;
+    const response = await fetch(url, {
+      headers: { "User-Agent": "sonbot-slack-app" }
+    });
+
+    if (response.status == 404) {
+      await respond({
+        reponse_type: "ephemeral",
+        text: `Couldn't find anything on "${topic}". Try being more specific or check spelling.`
+      });
+      return;
+    }
+
+    if (!response.ok) {
+      throw new Error(`Wikipedia API returned ${response.status}`);
+    }
+    const data = await response.json();
+    if (data.type === `disambiguation`) {
+      await respond({
+        response_type: `ephemeral`,
+        text: ` "${topic}" could mean several things, try a more specific term.`
+      });
+      return;
+    }
+    const sentences = data.extract.split(". ");
+    const shortExplanation = sentences.slice(0, 2).join(". ") + (sentences.length > 1 ? "." : "");
+    const link = data.content_urls?.desktop?.page;
+
+    await respond({
+      response_type: "in_channel",
+      text: `*${data.title}*\n${shortExplanation}${link ? `\n<${link}|Read more>` : ""}`
+    });
+  } catch(error) {
+    console.error("Error fetching explanation", error);
+    await respond({
+      response_type: "ephemeral",
+      text: "Sorry, something went wrong fetching that explanation. Try again."
+    });
+  }
+});
+
+const fs = require("fs").promises;
+const path = require("path");
+const FEEDBACK_FILE = path.join(__dirname, "feedback.json");
+
+app.command("/sonbot-feedback", async ({ command, ack, respond}) => {
+  await ack();
+  const feedbackText = command.text.trim();
+  if (!feedbackText) {
+    await respond({
+      response_type: "ephemeral",
+      text: "Please include your feedback after the command, e.g. `/sonbot-feedback The bitcoin command is slow`"
+    });
+    return;
+  }
+
+  const entry = {
+    timestamp: new Date().toISOString(),
+    userId: command.user_id,
+    userName: command.user_name,
+    channelId: command.channel_id,
+    feedback: feedbackText
+  };
+
+  try {
+    let feedbackList = [];
+    try {
+      const existing = await fs.readFile(FEEDBACK_FILE, "utf8");
+      if (existing.trim()) {
+        feedbackList = JSON.parse(existing);
+      }
+    } catch (err) {
+        if (err.code !== "ENOENT") throw err;
+      }
+      feedbackList.push(entry);
+      await fs.writeFile(FEEDBACK_FILE, JSON.stringify(feedbackList, null, 2));
+      await respond({
+        response_type: "ephemeral",
+        text: `Thanks! Your feedback has been saved:\n> ${feedbackText}`
+      });
+    } catch (error) {
+      console.error("Error saving feedback", error);
+      await respond({
+        response_type: "ephemeral",
+        text: "Sorry, something went wrong saving your feedback."
+      });
+  }
+});
+
+app.command("/sonbot-word", async ({ ack, respond}) => {
+  await ack();
+
+  const words = [
+    "serendipity", "grandiose", "ephemeral", "luminous", "quixotic", "labyrinth",
+    "mellifluous", "petrichor", "wanderlust", "solitude", "nostalgia",
+    "cascade", "whimsical", "resilience", "eloquent", "paradox",
+    "tranquil", "enigma", "vivid", "juxtapose", "ethereal"
+  ];
+
+  const word = words[Math.floor(Math.random() * words.length)];
+
+  try {
+    const res = await fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${word}`);
+
+    if (!res.ok) {
+      throw new Error(`Dictionary API returned ${res.status}`);
+    }
+
+    const data = await res.json();
+    const meaning = data[0].meanings[0];
+    const partOfSpeech = meaning.partOfSpeech;
+    const definition = meaning.definitions[0].definition;
+    const example = meaning.definitions[0].example;
+
+    await respond({
+      text: `*${word}* _(${partOfSpeech})_\n${definition}${example ? `\n_e.g. "${example}"_` : ""}`
+    });
+  } catch (error) {
+    console.error("Error fetching word definition:", error);
+    await respond({ text: `Couldn't fetch the definition for "${word}" right now, try again later.`})
   }
 });
 
